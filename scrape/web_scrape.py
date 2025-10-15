@@ -407,6 +407,42 @@ class Tools:
             log_message(f"[drag] failed: {exc}", "ERROR")
             return f"Error dragging: {exc}"
 
+    @staticmethod
+    def scroll_point(x: float, y: float, delta_x: float, delta_y: float) -> str:
+        if not Tools._driver:
+            return "Error: browser not open"
+        try:
+            script = """
+                const x = arguments[0];
+                const y = arguments[1];
+                const dx = arguments[2] || 0;
+                const dy = arguments[3] || 0;
+                const target = document.elementFromPoint(x, y) || document.body;
+                if (!target) return { ok: false, reason: 'element_from_point_null' };
+                const evt = new WheelEvent('wheel', {
+                    clientX: x,
+                    clientY: y,
+                    deltaX: dx,
+                    deltaY: dy,
+                    bubbles: true,
+                    cancelable: true
+                });
+                const cancelled = !target.dispatchEvent(evt);
+                if (!cancelled && typeof window !== 'undefined') {
+                    window.scrollBy(dx, dy);
+                }
+                return { ok: true, cancelled };
+            """
+            res = Tools._driver.execute_script(script, float(x), float(y), float(delta_x), float(delta_y))
+            if not isinstance(res, dict) or not res.get("ok"):
+                reason = res.get("reason") if isinstance(res, dict) else "unknown"
+                return f"Error scrolling at point: {reason}"
+            log_message(f"[scroll_at] wheel dx={delta_x:.2f} dy={delta_y:.2f} at ({x:.1f},{y:.1f})", "DEBUG")
+            return "Scrolled at point"
+        except Exception as exc:
+            log_message(f"[scroll_at] failed: {exc}", "ERROR")
+            return f"Error scrolling at point: {exc}"
+
 # ──────────────────────────────────────────────────────────────
 # 3) Environment configuration
 # ──────────────────────────────────────────────────────────────
@@ -749,6 +785,49 @@ def scroll_down():
     if not _result_ok(msg):
         return _error(msg, 500)
     _queue_event(data.get("sid") or next(iter(_SESSIONS), ""), {"type": "status", "msg": msg, "ts": int(time.time() * 1000)})
+    return _ok(message=msg)
+
+
+@app.post("/scroll/point")
+def scroll_point():
+    if not _auth_ok(request):
+        return _error("unauthorized", 401)
+    data = request.get_json(silent=True) or {}
+    try:
+        x = float(data.get("x"))
+        y = float(data.get("y"))
+        delta_x = float(data.get("deltaX") or data.get("delta_x") or 0.0)
+        delta_y = float(data.get("deltaY") or data.get("delta_y") or 0.0)
+        viewport_w = float(data.get("viewportW") or data.get("viewport_width"))
+        viewport_h = float(data.get("viewportH") or data.get("viewport_height"))
+        natural_w = float(data.get("naturalW") or data.get("naturalWidth") or viewport_w)
+        natural_h = float(data.get("naturalH") or data.get("naturalHeight") or viewport_h)
+    except Exception:
+        return _error("invalid scroll coordinates", 400)
+    if viewport_w <= 0 or viewport_h <= 0:
+        return _error("invalid viewport dimensions", 400)
+    scale_x = natural_w / max(1.0, viewport_w)
+    scale_y = natural_h / max(1.0, viewport_h)
+    vx = x * scale_x
+    vy = y * scale_y
+    log_message(
+        f"[scroll_point] ({x:.1f},{y:.1f}) scaled ({vx:.1f},{vy:.1f}) delta ({delta_x:.2f},{delta_y:.2f})",
+        "DEBUG"
+    )
+    with _slot():
+        msg = Tools.scroll_point(vx, vy, delta_x, delta_y)
+    if not _result_ok(msg):
+        return _error(msg, 500)
+    sid = data.get("sid") or next(iter(_SESSIONS), "")
+    _queue_event(
+        sid,
+        {
+            "type": "status",
+            "msg": msg,
+            "detail": {"x": vx, "y": vy, "delta": [delta_x, delta_y]},
+            "ts": int(time.time() * 1000),
+        },
+    )
     return _ok(message=msg)
 
 
