@@ -17,6 +17,9 @@ import base64
 import io
 import json
 import os
+import platform
+import random
+import shutil
 import subprocess
 import sys
 import threading
@@ -81,8 +84,8 @@ if not SETUP_MARKER.exists():
     _pip_install(
         "--upgrade",
         "pip",
-        "flask",
-        "flask-cors",
+        "Flask",
+        "Flask-Cors",
         "python-dotenv",
         "requests",
         "beautifulsoup4",
@@ -118,13 +121,244 @@ from flask import Flask, Response, jsonify, request, send_from_directory, g  # n
 from flask_cors import CORS  # noqa: E402
 from dotenv import load_dotenv  # noqa: E402
 from PIL import Image  # noqa: E402
+from selenium import webdriver  # noqa: E402
+from selenium.common.exceptions import TimeoutException, WebDriverException  # noqa: E402
+from selenium.webdriver.common.by import By  # noqa: E402
+from selenium.webdriver.common.keys import Keys  # noqa: E402
+from selenium.webdriver.chrome.options import Options  # noqa: E402
+from selenium.webdriver.chrome.service import Service  # noqa: E402
+from selenium.webdriver.support import expected_conditions as EC  # noqa: E402
+from selenium.webdriver.support.ui import WebDriverWait  # noqa: E402
+from webdriver_manager.chrome import ChromeDriverManager  # noqa: E402
 
-# Use existing Selenium helpers bundled with Hydra
-ROOT_DIR = SCRIPT_DIR.parent.parent
-TOOLS_DIR = ROOT_DIR / "examples"
-if str(TOOLS_DIR) not in sys.path:
-    sys.path.append(str(TOOLS_DIR))
-from tools import Tools  # type: ignore  # noqa: E402
+
+def log_message(msg: str, level: str = "INFO") -> None:
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{ts}] [{level.upper()}] {msg}")
+
+
+class Tools:
+    _driver: Optional[webdriver.Chrome] = None
+
+    @staticmethod
+    def _find_system_chromedriver() -> Optional[str]:
+        candidates = [
+            shutil.which("chromedriver"),
+            "/usr/bin/chromedriver",
+            "/usr/local/bin/chromedriver",
+            "/snap/bin/chromium.chromedriver",
+            "/usr/lib/chromium-browser/chromedriver",
+            "/opt/homebrew/bin/chromedriver",
+        ]
+        for path in filter(None, candidates):
+            if os.path.isfile(path) and os.access(path, os.X_OK):
+                try:
+                    subprocess.run([path, "--version"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    return path
+                except Exception:
+                    continue
+        return None
+
+    @staticmethod
+    def open_browser(headless: bool = False, force_new: bool = False) -> str:
+        if force_new and Tools._driver:
+            try:
+                Tools._driver.quit()
+            except Exception:
+                pass
+            Tools._driver = None
+
+        if Tools._driver:
+            return "Browser already open"
+
+        chrome_bin = (
+            os.getenv("CHROME_BIN")
+            or shutil.which("google-chrome")
+            or shutil.which("chromium-browser")
+            or shutil.which("chromium")
+            or "/snap/bin/chromium"
+            or "/usr/bin/chromium-browser"
+            or "/usr/bin/chromium"
+        )
+
+        opts = Options()
+        if chrome_bin:
+            opts.binary_location = chrome_bin
+        if headless:
+            opts.add_argument("--headless=new")
+        opts.add_argument("--window-size=1920,1080")
+        opts.add_argument("--disable-gpu")
+        opts.add_argument("--no-sandbox")
+        opts.add_argument("--disable-dev-shm-usage")
+        opts.add_argument("--remote-allow-origins=*")
+        opts.add_argument(f"--remote-debugging-port={random.randint(45000, 65000)}")
+
+        try:
+            log_message("[open_browser] Trying Selenium-Manager…", "DEBUG")
+            Tools._driver = webdriver.Chrome(options=opts)
+            log_message("[open_browser] Launched via Selenium-Manager.", "SUCCESS")
+            return "Browser launched (selenium-manager)"
+        except WebDriverException as e:
+            log_message(f"[open_browser] Selenium-Manager failed: {e}", "WARNING")
+
+        snap_drv = "/snap/chromium/current/usr/lib/chromium-browser/chromedriver"
+        if os.path.exists(snap_drv):
+            try:
+                log_message(f"[open_browser] Using snap chromedriver at {snap_drv}", "DEBUG")
+                Tools._driver = webdriver.Chrome(service=Service(snap_drv), options=opts)
+                log_message("[open_browser] Launched via snap chromedriver.", "SUCCESS")
+                return "Browser launched (snap chromedriver)"
+            except WebDriverException as e:
+                log_message(f"[open_browser] Snap chromedriver failed: {e}", "WARNING")
+
+        sys_drv = Tools._find_system_chromedriver()
+        if sys_drv:
+            try:
+                log_message(f"[open_browser] Trying system chromedriver at {sys_drv}", "DEBUG")
+                Tools._driver = webdriver.Chrome(service=Service(sys_drv), options=opts)
+                log_message("[open_browser] Launched via system chromedriver.", "SUCCESS")
+                return "Browser launched (system chromedriver)"
+            except WebDriverException as e:
+                log_message(f"[open_browser] System chromedriver failed: {e}", "WARNING")
+
+        arch = (platform.machine() or "").lower()
+        if arch in ("aarch64", "arm64", "armv8l", "armv7l") and chrome_bin:
+            try:
+                raw = subprocess.check_output([chrome_bin, "--version"]).decode().strip()
+                ver = raw.split()[1]
+                url = (
+                    f"https://edgedl.me.gvt1.com/edgedl/chrome/chrome-for-testing/"
+                    f"{ver}/linux-arm64/chromedriver-linux-arm64.zip"
+                )
+                tmp_zip = "/tmp/chromedriver_arm64.zip"
+                log_message(f"[open_browser] Downloading ARM64 driver from {url}", "DEBUG")
+                subprocess.check_call(["wget", "-qO", tmp_zip, url])
+                subprocess.check_call(["unzip", "-o", tmp_zip, "-d", "/tmp"])
+                subprocess.check_call(["sudo", "mv", "/tmp/chromedriver", "/usr/local/bin/chromedriver"])
+                subprocess.check_call(["sudo", "chmod", "+x", "/usr/local/bin/chromedriver"])
+                drv = shutil.which("chromedriver")
+                log_message(f"[open_browser] Installed ARM64 driver at {drv}", "DEBUG")
+                Tools._driver = webdriver.Chrome(service=Service(drv), options=opts)
+                log_message("[open_browser] Launched via downloaded ARM64 chromedriver.", "SUCCESS")
+                return "Browser launched (downloaded ARM64 chromedriver)"
+            except Exception as e:
+                log_message(f"[open_browser] ARM64 download/install failed: {e}", "WARNING")
+
+        if arch in ("x86_64", "amd64") and chrome_bin:
+            try:
+                raw = subprocess.check_output([chrome_bin, "--version"]).decode().strip()
+                browser_major = raw.split()[1].split(".")[0]
+            except Exception:
+                browser_major = "latest"
+            try:
+                log_message(f"[open_browser] Installing ChromeDriver {browser_major} via webdriver-manager", "DEBUG")
+                drv_path = ChromeDriverManager(driver_version=browser_major).install()
+                Tools._driver = webdriver.Chrome(service=Service(drv_path), options=opts)
+                log_message("[open_browser] Launched via webdriver-manager.", "SUCCESS")
+                return "Browser launched (webdriver-manager)"
+            except Exception as e:
+                log_message(f"[open_browser] webdriver-manager failed: {e}", "ERROR")
+
+        try:
+            log_message("[open_browser] Attempting `sudo snap install chromium`…", "DEBUG")
+            subprocess.check_call(["sudo", "snap", "install", "chromium"])
+            Tools._driver = webdriver.Chrome(service=Service(snap_drv), options=opts)
+            log_message("[open_browser] Launched via newly-installed snap chromium.", "SUCCESS")
+            return "Browser launched (snap install fallback)"
+        except Exception as e:
+            log_message(f"[open_browser] Auto-snap install failed or Chrome still not found: {e}", "ERROR")
+
+        raise RuntimeError(
+            "No usable Chrome/Chromium driver. Install Chrome and a matching chromedriver, "
+            "or set CHROME_BIN and ensure chromedriver is on PATH."
+        )
+
+    @staticmethod
+    def close_browser() -> str:
+        if Tools._driver:
+            try:
+                Tools._driver.quit()
+                log_message("[close_browser] Browser closed.", "DEBUG")
+            except Exception:
+                pass
+            Tools._driver = None
+            return "Browser closed"
+        return "No browser to close"
+
+    @staticmethod
+    def is_browser_open() -> bool:
+        return Tools._driver is not None
+
+    @staticmethod
+    def navigate(url: str) -> str:
+        if not Tools._driver:
+            return "Error: browser not open"
+        log_message(f"[navigate] → {url}", "DEBUG")
+        Tools._driver.get(url)
+        return f"Navigated to {url}"
+
+    @staticmethod
+    def click(selector: str, timeout: int = 8) -> str:
+        if not Tools._driver:
+            return "Error: browser not open"
+        try:
+            drv = Tools._driver
+            el = WebDriverWait(drv, timeout).until(EC.element_to_be_clickable((By.CSS_SELECTOR, selector)))
+            drv.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+            el.click()
+            focused = drv.execute_script("return document.activeElement === arguments[0];", el)
+            log_message(f"[click] {selector} clicked (focused={focused})", "DEBUG")
+            return f"Clicked {selector}"
+        except Exception as e:
+            log_message(f"[click] Error clicking {selector}: {e}", "ERROR")
+            return f"Error clicking {selector}: {e}"
+
+    @staticmethod
+    def input(selector: str, text: str, timeout: int = 8) -> str:
+        if not Tools._driver:
+            return "Error: browser not open"
+        try:
+            drv = Tools._driver
+            el = WebDriverWait(drv, timeout).until(EC.element_to_be_clickable((By.CSS_SELECTOR, selector)))
+            drv.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+            el.clear()
+            el.send_keys(text + Keys.RETURN)
+            log_message(f"[input] Sent {text!r} to {selector}", "DEBUG")
+            return f"Sent {text!r} to {selector}"
+        except Exception as e:
+            log_message(f"[input] Error typing into {selector}: {e}", "ERROR")
+            return f"Error typing into {selector}: {e}"
+
+    @staticmethod
+    def get_dom_snapshot(max_chars: int = 200_000) -> str:
+        if not Tools._driver:
+            return ""
+        try:
+            dom = Tools._driver.execute_script("return document.documentElement.outerHTML;")
+            if dom and len(dom) > max_chars:
+                dom = dom[:max_chars]
+            return dom or ""
+        except Exception as exc:
+            log_message(f"[dom] snapshot failed: {exc}", "WARNING")
+            return ""
+
+    @staticmethod
+    def scroll(amount: int = 600) -> str:
+        if not Tools._driver:
+            return "Error: browser not open"
+        try:
+            Tools._driver.execute_script("window.scrollBy(0, arguments[0]);", amount)
+            return f"Scrolled by {amount}"
+        except Exception as exc:
+            log_message(f"[scroll] failed: {exc}", "WARNING")
+            return f"Error scrolling: {exc}"
+
+    @staticmethod
+    def screenshot(filename: str = "screenshot.png") -> str:
+        if not Tools._driver:
+            return "Error: browser not open"
+        Tools._driver.save_screenshot(filename)
+        return filename
 
 # ──────────────────────────────────────────────────────────────
 # 3) Environment configuration
