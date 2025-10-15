@@ -14,7 +14,6 @@ Boot behavior mirrors other Hydra services:
 from __future__ import annotations
 
 import base64
-import io
 import json
 import os
 import platform
@@ -25,7 +24,6 @@ import sys
 import threading
 import time
 import uuid
-from datetime import datetime, timedelta
 from pathlib import Path
 from queue import Empty, Queue
 from typing import Dict, Optional
@@ -130,6 +128,7 @@ from selenium.webdriver.chrome.service import Service  # noqa: E402
 from selenium.webdriver.support import expected_conditions as EC  # noqa: E402
 from selenium.webdriver.support.ui import WebDriverWait  # noqa: E402
 from webdriver_manager.chrome import ChromeDriverManager  # noqa: E402
+from selenium.webdriver.common.action_chains import ActionChains  # noqa: E402
 
 
 def log_message(msg: str, level: str = "INFO") -> None:
@@ -383,6 +382,30 @@ class Tools:
         except Exception as exc:
             log_message(f"[history] forward failed: {exc}", "ERROR")
             return f"Error navigating forward: {exc}"
+
+    @staticmethod
+    def drag(start_x: float, start_y: float, end_x: float, end_y: float) -> str:
+        if not Tools._driver:
+            return "Error: browser not open"
+        try:
+            drv = Tools._driver
+            body = drv.find_element(By.TAG_NAME, "body")
+            sx = int(round(start_x))
+            sy = int(round(start_y))
+            ex = int(round(end_x))
+            ey = int(round(end_y))
+            actions = ActionChains(drv)
+            actions.move_to_element_with_offset(body, sx, sy)
+            actions.click_and_hold()
+            actions.move_by_offset(ex - sx, ey - sy)
+            actions.release()
+            actions.perform()
+            msg = f"Dragged from ({sx},{sy}) to ({ex},{ey})"
+            log_message(f"[drag] {msg}", "DEBUG")
+            return msg
+        except Exception as exc:
+            log_message(f"[drag] failed: {exc}", "ERROR")
+            return f"Error dragging: {exc}"
 
 # ──────────────────────────────────────────────────────────────
 # 3) Environment configuration
@@ -815,6 +838,54 @@ def click_xy():
         },
     )
     return _ok(message="click_xy", detail=result)
+
+
+@app.post("/drag")
+def drag():
+    if not _auth_ok(request):
+        return _error("unauthorized", 401)
+    data = request.get_json(silent=True) or {}
+    try:
+        start_x = float(data.get("startX"))
+        start_y = float(data.get("startY"))
+        end_x = float(data.get("endX"))
+        end_y = float(data.get("endY"))
+        viewport_w = float(data.get("viewportW") or data.get("viewport_width"))
+        viewport_h = float(data.get("viewportH") or data.get("viewport_height"))
+        natural_w = float(data.get("naturalW") or data.get("naturalWidth") or viewport_w)
+        natural_h = float(data.get("naturalH") or data.get("naturalHeight") or viewport_h)
+    except Exception:
+        return _error("invalid drag coordinates", 400)
+    if viewport_w <= 0 or viewport_h <= 0:
+        return _error("invalid viewport dimensions", 400)
+    scale_x = natural_w / max(1.0, viewport_w)
+    scale_y = natural_h / max(1.0, viewport_h)
+    start_vx = start_x * scale_x
+    start_vy = start_y * scale_y
+    end_vx = end_x * scale_x
+    end_vy = end_y * scale_y
+    log_message(
+        f"[drag] ({start_x:.1f},{start_y:.1f})→({end_x:.1f},{end_y:.1f}) viewport ({start_vx:.1f},{start_vy:.1f})→({end_vx:.1f},{end_vy:.1f})",
+        "DEBUG"
+    )
+    with _slot():
+        msg = Tools.drag(start_vx, start_vy, end_vx, end_vy)
+    if not _result_ok(msg):
+        return _error(msg, 500)
+    sid = data.get("sid") or next(iter(_SESSIONS), "")
+    _queue_event(
+        sid,
+        {
+            "type": "status",
+            "msg": msg,
+            "detail": {
+                "start": [start_vx, start_vy],
+                "end": [end_vx, end_vy]
+            },
+            "ts": int(time.time() * 1000),
+        },
+    )
+    return _ok(message=msg)
 
 
 @app.get("/dom")
