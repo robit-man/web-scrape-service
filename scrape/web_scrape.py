@@ -447,6 +447,108 @@ class Tools:
             log_message(f"[scroll_at] failed: {exc}", "ERROR")
             return f"Error scrolling at point: {exc}"
 
+    @staticmethod
+    def sync_input(value: str, selector: str = "", submit: bool = False, input_type: str = "", data: Optional[str] = None) -> str:
+        if not Tools._driver:
+            return "Error: browser not open"
+        try:
+            drv = Tools._driver
+
+            script = """
+                const selector = arguments[0];
+                const value = arguments[1];
+                const submit = !!arguments[2];
+                const inputType = arguments[3] || '';
+                const data = arguments[4] === null ? null : arguments[4];
+
+                const isTextTarget = (el) => {
+                    if (!el) return false;
+                    const tag = (el.tagName || '').toUpperCase();
+                    if (tag === 'TEXTAREA') return true;
+                    if (el.isContentEditable) return true;
+                    if (tag !== 'INPUT') return false;
+                    const type = (el.type || '').toLowerCase();
+                    return !['button','checkbox','radio','submit','reset','file','image','range','color','hidden'].includes(type);
+                };
+
+                let target = document.activeElement;
+                if (!isTextTarget(target) && selector) {
+                    const found = document.querySelector(selector);
+                    if (isTextTarget(found)) {
+                        target = found;
+                        try { target.focus({ preventScroll: false }); } catch (_) { target.focus(); }
+                    }
+                }
+                if (!isTextTarget(target)) {
+                    return { ok: false, reason: 'no_focusable_input' };
+                }
+                if (target !== document.activeElement && typeof target.focus === 'function') {
+                    try { target.focus({ preventScroll: false }); } catch (_) { target.focus(); }
+                }
+
+                const setValue = (el, next) => {
+                    if (!el) return;
+                    if (el.isContentEditable) {
+                        el.textContent = next;
+                        return;
+                    }
+                    const proto = Object.getPrototypeOf(el);
+                    const descriptor = proto && Object.getOwnPropertyDescriptor(proto, 'value');
+                    const setter =
+                        descriptor?.set ||
+                        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set ||
+                        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+                    if (setter) setter.call(el, next);
+                    else el.value = next;
+                };
+
+                setValue(target, value);
+
+                const eventInit = { bubbles: true, cancelable: true };
+                try {
+                    if (typeof InputEvent === 'function') {
+                        const inputEvt = new InputEvent('input', { ...eventInit, inputType: inputType || 'insertText', data });
+                        target.dispatchEvent(inputEvt);
+                    } else {
+                        target.dispatchEvent(new Event('input', eventInit));
+                    }
+                } catch (_) {
+                    target.dispatchEvent(new Event('input', eventInit));
+                }
+
+                if (submit) {
+                    target.dispatchEvent(new Event('change', eventInit));
+                    const form = target.form;
+                    if (form) {
+                        if (typeof form.requestSubmit === 'function') form.requestSubmit();
+                        else form.submit();
+                    } else {
+                        const down = new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true });
+                        target.dispatchEvent(down);
+                        const up = new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true });
+                        target.dispatchEvent(up);
+                    }
+                }
+
+                return {
+                    ok: true,
+                    tag: target.tagName || '',
+                    id: target.id || '',
+                    name: target.name || '',
+                    value: target.isContentEditable ? target.textContent || '' : target.value || ''
+                };
+            """
+
+            res = drv.execute_script(script, selector or '', value or '', bool(submit), input_type or '', data if data is not None else None)
+            if not isinstance(res, dict) or not res.get("ok"):
+                reason = res.get("reason") if isinstance(res, dict) else "sync_failed"
+                return f"Error syncing input: {reason}"
+            action = "Input submitted" if submit else "Input synced"
+            return action
+        except Exception as exc:
+            log_message(f"[sync_input] failed: {exc}", "ERROR")
+            return f"Error syncing input: {exc}"
+
 # ──────────────────────────────────────────────────────────────
 # 3) Environment configuration
 # ──────────────────────────────────────────────────────────────
@@ -929,11 +1031,37 @@ def click_xy():
             const y = arguments[1];
             const el = document.elementFromPoint(x, y);
             if (!el) return { ok: false, reason: 'element_from_point_null' };
-            try { el.scrollIntoView({block:'center', inline:'center'}); } catch (err) {}
+            try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch (_) {}
             const rect = el.getBoundingClientRect();
+            const detail = {
+                tag: el.tagName || '',
+                rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+                id: el.id || '',
+                name: el.getAttribute('name') || '',
+                type: el.getAttribute('type') || '',
+                role: el.getAttribute('role') || '',
+                contentEditable: !!el.isContentEditable,
+                selector: '',
+                value: ''
+            };
+            const esc = (val) => {
+                if (typeof CSS !== 'undefined' && CSS.escape) return CSS.escape(val);
+                return String(val).replace(/([ !"#$%&'()*+,./:;<=>?@[\\\]^`{|}~])/g, '\\\\$1');
+            };
+            if (detail.id) {
+                detail.selector = `#${esc(detail.id)}`;
+            } else if (detail.name && detail.tag === 'INPUT') {
+                detail.selector = `${detail.tag.toLowerCase()}[name="${detail.name.replace(/"/g, '\\"')}"]`;
+            }
+            if (detail.tag === 'INPUT' || detail.tag === 'TEXTAREA') {
+                detail.value = el.value || '';
+            } else if (el.isContentEditable) {
+                detail.value = el.textContent || '';
+            }
             try {
                 el.click();
-                return { ok: true, tag: el.tagName, rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } };
+                if (typeof el.focus === 'function') el.focus();
+                return { ok: true, tag: detail.tag, rect: detail.rect, detail };
             } catch (err) {
                 return { ok: false, reason: err && err.message ? err.message : String(err) };
             }
@@ -953,6 +1081,27 @@ def click_xy():
         },
     )
     return _ok(message="click_xy", detail=result)
+
+
+@app.post("/input/sync")
+def input_sync():
+    if not _auth_ok(request):
+        return _error("unauthorized", 401)
+    data = request.get_json(silent=True) or {}
+    sid = (data.get("sid") or "").strip()
+    if not sid:
+        return _error("missing sid", 400)
+    value = data.get("value", "")
+    selector = (data.get("selector") or "").strip()
+    submit = bool(data.get("submit"))
+    input_type = (data.get("inputType") or "").strip()
+    data_snippet = data.get("data")
+    _touch_session(sid)
+    with _slot():
+        msg = Tools.sync_input(value, selector=selector, submit=submit, input_type=input_type, data=data_snippet)
+    if not _result_ok(msg):
+        return _error(msg, 500)
+    return _ok(message=msg)
 
 
 @app.post("/drag")
