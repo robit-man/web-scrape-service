@@ -14,6 +14,7 @@ Boot behavior mirrors other Hydra services:
 from __future__ import annotations
 
 import base64
+import ipaddress
 import json
 import os
 import platform
@@ -99,10 +100,13 @@ if not SETUP_MARKER.exists():
             "SCRAPE_BIND=0.0.0.0\n"
             "SCRAPE_PORT=8130\n"
             "SCRAPE_REQUIRE_AUTH=0\n"
-            "SCRAPE_MAX_CONCURRENCY=2\n"
+            "SCRAPE_MAX_CONCURRENCY=4\n"
             "SCRAPE_QUEUE_TIMEOUT_S=0\n"
-            "SCRAPE_RATE_LIMIT_RPS=10\n"
-            "SCRAPE_RATE_LIMIT_BURST=20\n"
+            "SCRAPE_RATE_LIMIT_RPS=60\n"
+            "SCRAPE_RATE_LIMIT_BURST=180\n"
+            "SCRAPE_RATE_LIMIT_LOCAL_BYPASS=1\n"
+            "SCRAPE_RATE_LIMIT_DISABLED=0\n"
+            "SCRAPE_RATE_LIMIT_WHITELIST=\n"
             "SCRAPE_FILE_TTL_S=900\n"
             "SCRAPE_FRAME_KEEPALIVE_S=45\n"
             "SCRAPE_HEADLESS_DEFAULT=1\n".format(key=uuid.uuid4().hex),
@@ -452,10 +456,15 @@ API_KEY = (os.getenv("SCRAPE_API_KEY") or "").strip()
 BIND = os.getenv("SCRAPE_BIND", "0.0.0.0")
 PORT = int(os.getenv("SCRAPE_PORT", "8130"))
 AUTH_REQUIRED = os.getenv("SCRAPE_REQUIRE_AUTH", "0") in ("1", "true", "TRUE")
-MAX_CONCURRENCY = max(1, int(os.getenv("SCRAPE_MAX_CONCURRENCY", "2")))
+MAX_CONCURRENCY = max(4, int(os.getenv("SCRAPE_MAX_CONCURRENCY", "4")))
 QUEUE_TIMEOUT_S = float(os.getenv("SCRAPE_QUEUE_TIMEOUT_S", "2.0"))
-RATE_LIMIT_RPS = max(1, int(os.getenv("SCRAPE_RATE_LIMIT_RPS", "10")))
-RATE_LIMIT_BURST = max(1, int(os.getenv("SCRAPE_RATE_LIMIT_BURST", "20")))
+RATE_LIMIT_RPS = max(60, int(os.getenv("SCRAPE_RATE_LIMIT_RPS", "60")))
+RATE_LIMIT_BURST = max(180, int(os.getenv("SCRAPE_RATE_LIMIT_BURST", "180")))
+RATE_LIMIT_DISABLED = os.getenv("SCRAPE_RATE_LIMIT_DISABLED", "0").strip().lower() in ("1", "true", "yes", "on")
+RATE_LIMIT_LOCAL_BYPASS = os.getenv("SCRAPE_RATE_LIMIT_LOCAL_BYPASS", "1").strip().lower() in ("1", "true", "yes", "on")
+RATE_LIMIT_WHITELIST = {
+    entry.strip() for entry in os.getenv("SCRAPE_RATE_LIMIT_WHITELIST", "").split(",") if entry.strip()
+}
 FILE_TTL_S = max(60, int(os.getenv("SCRAPE_FILE_TTL_S", "900")))
 FRAME_KEEPALIVE_S = max(10, int(os.getenv("SCRAPE_FRAME_KEEPALIVE_S", "45")))
 HEADLESS_DEFAULT = os.getenv("SCRAPE_HEADLESS_DEFAULT", "1") in ("1", "true", "TRUE", "yes")
@@ -560,6 +569,29 @@ def _result_ok(message: str) -> bool:
     return not msg.startswith("error")
 
 
+def _sanitize_ip(raw_ip: str) -> str:
+    ip = (raw_ip or "").strip()
+    if not ip:
+        return "0.0.0.0"
+    # Handle IPv4 addresses that include a port (e.g. "127.0.0.1:8080")
+    if ip.count(":") == 1 and ip.rsplit(":", 1)[1].isdigit():
+        ip = ip.rsplit(":", 1)[0]
+    ip = ip.strip()
+    try:
+        ipaddress.ip_address(ip)
+    except ValueError:
+        return "0.0.0.0"
+    return ip
+
+
+def _is_local_ip(ip: str) -> bool:
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return addr.is_loopback or addr.is_private
+
+
 # ──────────────────────────────────────────────────────────────
 # 5) Rate limit & auth helpers
 # ──────────────────────────────────────────────────────────────
@@ -569,7 +601,11 @@ def _now() -> float:
 
 @app.before_request
 def _apply_rate_limit():
-    ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip() or request.remote_addr or "0.0.0.0"
+    forwarded = request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+    ip = _sanitize_ip(forwarded or request.remote_addr or "0.0.0.0")
+    if RATE_LIMIT_DISABLED or (RATE_LIMIT_LOCAL_BYPASS and _is_local_ip(ip)) or ip in RATE_LIMIT_WHITELIST:
+        g.client_ip = ip
+        return
     now = _now()
     with _RATE_LOCK:
         bucket = _RATE_BUCKETS.get(ip)
