@@ -360,6 +360,30 @@ class Tools:
         Tools._driver.save_screenshot(filename)
         return filename
 
+    @staticmethod
+    def go_back() -> str:
+        if not Tools._driver:
+            return "Error: browser not open"
+        try:
+            Tools._driver.back()
+            log_message("[history] Navigated back", "DEBUG")
+            return "Navigated back"
+        except Exception as exc:
+            log_message(f"[history] back failed: {exc}", "ERROR")
+            return f"Error navigating back: {exc}"
+
+    @staticmethod
+    def go_forward() -> str:
+        if not Tools._driver:
+            return "Error: browser not open"
+        try:
+            Tools._driver.forward()
+            log_message("[history] Navigated forward", "DEBUG")
+            return "Navigated forward"
+        except Exception as exc:
+            log_message(f"[history] forward failed: {exc}", "ERROR")
+            return f"Error navigating forward: {exc}"
+
 # ──────────────────────────────────────────────────────────────
 # 3) Environment configuration
 # ──────────────────────────────────────────────────────────────
@@ -673,6 +697,62 @@ def scroll():
     return _ok(message=msg)
 
 
+@app.post("/scroll/up")
+def scroll_up():
+    if not _auth_ok(request):
+        return _error("unauthorized", 401)
+    data = request.get_json(silent=True) or {}
+    amount = abs(int(data.get("amount", 600)))
+    with _slot():
+        msg = Tools.scroll(-amount)
+    if not _result_ok(msg):
+        return _error(msg, 500)
+    _queue_event(data.get("sid") or next(iter(_SESSIONS), ""), {"type": "status", "msg": msg, "ts": int(time.time() * 1000)})
+    return _ok(message=msg)
+
+
+@app.post("/scroll/down")
+def scroll_down():
+    if not _auth_ok(request):
+        return _error("unauthorized", 401)
+    data = request.get_json(silent=True) or {}
+    amount = abs(int(data.get("amount", 600)))
+    with _slot():
+        msg = Tools.scroll(amount)
+    if not _result_ok(msg):
+        return _error(msg, 500)
+    _queue_event(data.get("sid") or next(iter(_SESSIONS), ""), {"type": "status", "msg": msg, "ts": int(time.time() * 1000)})
+    return _ok(message=msg)
+
+
+@app.post("/history/back")
+def history_back():
+    if not _auth_ok(request):
+        return _error("unauthorized", 401)
+    data = request.get_json(silent=True) or {}
+    with _slot():
+        msg = Tools.go_back()
+    if not _result_ok(msg):
+        return _error(msg, 500)
+    sid = data.get("sid") or next(iter(_SESSIONS), "")
+    _queue_event(sid, {"type": "status", "msg": msg, "ts": int(time.time() * 1000)})
+    return _ok(message=msg)
+
+
+@app.post("/history/forward")
+def history_forward():
+    if not _auth_ok(request):
+        return _error("unauthorized", 401)
+    data = request.get_json(silent=True) or {}
+    with _slot():
+        msg = Tools.go_forward()
+    if not _result_ok(msg):
+        return _error(msg, 500)
+    sid = data.get("sid") or next(iter(_SESSIONS), "")
+    _queue_event(sid, {"type": "status", "msg": msg, "ts": int(time.time() * 1000)})
+    return _ok(message=msg)
+
+
 @app.post("/click_xy")
 def click_xy():
     if not _auth_ok(request):
@@ -693,6 +773,7 @@ def click_xy():
     scale_y = natural_h / max(1.0, viewport_h)
     vx = x * scale_x
     vy = y * scale_y
+    log_message(f"[click_xy] requested ({x:.1f}, {y:.1f}) → viewport ({vx:.1f},{vy:.1f})", "DEBUG")
     with _slot():
         try:
             drv = Tools._driver  # type: ignore[attr-defined]
@@ -769,6 +850,11 @@ def screenshot():
             width, height = im.size
     except Exception:
         width = height = 0
+    try:
+        raw_bytes = fpath.read_bytes()
+        b64_data = base64.b64encode(raw_bytes).decode("ascii")
+    except Exception:
+        b64_data = ""
     rel_path = f"/frames/{fname}"
     _record_frame_meta(sid, fname, width, height)
     _queue_event(
@@ -778,10 +864,12 @@ def screenshot():
             "file": rel_path,
             "width": width,
             "height": height,
+            "mime": "image/png",
+            "b64": b64_data,
             "ts": int(time.time() * 1000),
         },
     )
-    return _ok(file=rel_path, width=width, height=height)
+    return _ok(file=rel_path, width=width, height=height, mime="image/png", b64=b64_data)
 
 
 @app.get("/frames/<path:filename>")
