@@ -102,7 +102,7 @@ if not SETUP_MARKER.exists():
             "SCRAPE_PORT=8130\n"
             "SCRAPE_REQUIRE_AUTH=0\n"
             "SCRAPE_MAX_CONCURRENCY=2\n"
-            "SCRAPE_QUEUE_TIMEOUT_S=2.0\n"
+            "SCRAPE_QUEUE_TIMEOUT_S=0\n"
             "SCRAPE_RATE_LIMIT_RPS=10\n"
             "SCRAPE_RATE_LIMIT_BURST=20\n"
             "SCRAPE_FILE_TTL_S=900\n"
@@ -422,9 +422,13 @@ def _slot(timeout: Optional[float] = None):
             self.acquired = False
 
         def __enter__(self):
-            self.acquired = _CONC_SEM.acquire(timeout=self.timeout)
-            if not self.acquired:
-                raise TimeoutError("scrape at capacity")
+            if self.timeout <= 0:
+                _CONC_SEM.acquire()
+                self.acquired = True
+            else:
+                self.acquired = _CONC_SEM.acquire(timeout=self.timeout)
+                if not self.acquired:
+                    raise TimeoutError("scrape at capacity")
             return self
 
         def __exit__(self, exc_type, exc, tb):
