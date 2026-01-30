@@ -66,9 +66,10 @@ A minimal REST microservice that automates a local Chrome/Chromium instance with
 ## Quick Start
 
 ```bash
-# 1) Place the script in a directory (e.g., hydra-scrape/), then run it:
-python3 hydra_scrape.py
+cd scrape && python3 web_scrape.py
+```
 
+```bash
 # On first run, it will:
 #  - Create .venv/
 #  - Install dependencies
