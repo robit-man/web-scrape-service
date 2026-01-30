@@ -66,7 +66,7 @@ A minimal REST microservice that automates a local Chrome/Chromium instance with
 ## Quick Start
 
 ```bash
-cd scrape && python3 web_scrape.py
+git clone https://github.com/robit-man/web-scrape-service.git && cd web-scrape-service/scrape && python3 web_scrape.py
 ```
 
 ```bash
